@@ -13,6 +13,8 @@ const TITLES: Record<WinState["kind"], string> = {
   sun: "sun.exe",
   moon: "moon.exe",
   city: "city.gif",
+  cloud: "cloud.exe",
+  plant: "terra.exe",
 };
 
 export function DesktopWindow({ win, onMove, onFocus, onClose, onMinimize }: Props) {

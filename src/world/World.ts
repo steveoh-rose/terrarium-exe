@@ -1,10 +1,27 @@
 import * as THREE from "three";
+import {
+  EffectComposer,
+  RenderPass,
+  EffectPass,
+  BloomEffect,
+  PixelationEffect,
+} from "postprocessing";
 import { createSky, resizeSky, MAX_LIGHTS } from "./sky";
+import { DitherEffect } from "./effects/DitherEffect";
+import { defaultSettings, type RenderSettings } from "./settings";
 import type { Entity } from "./entities/entity";
 import { Sun } from "./entities/sun";
 import { Moon } from "./entities/moon";
 import { City } from "./entities/city";
-import { contentRect, type WinState, type FieldLight } from "./types";
+import { Cloud } from "./entities/cloud";
+import { Plant } from "./entities/plant";
+import {
+  contentRect,
+  type WinState,
+  type Field,
+  type FieldLight,
+  type FieldWater,
+} from "./types";
 
 function makeEntity(kind: WinState["kind"]): Entity {
   switch (kind) {
@@ -14,20 +31,38 @@ function makeEntity(kind: WinState["kind"]): Entity {
       return new Moon();
     case "city":
       return new City();
+    case "cloud":
+      return new Cloud();
+    case "plant":
+      return new Plant();
   }
 }
 
 /**
- * One renderer, one scene, one world. Windows are not separate scenes — they
- * are scissor rectangles onto this shared field. See the PRD's core insight.
+ * One renderer, one scene, one world. The scene is rendered to a low-res
+ * buffer, post-processed (bloom -> Bayer dither/posterise), then composited:
+ * each window is a scissor rectangle revealing its slice of that single
+ * processed image, so the pixel grid is consistent across the whole desktop.
  */
 export class World {
   private renderer: THREE.WebGLRenderer;
   private scene: THREE.Scene;
   private camera: THREE.OrthographicCamera;
   private sky: THREE.Mesh;
+  private composer: EffectComposer;
+  private bloom: BloomEffect;
+  private pixelation: PixelationEffect;
+  private dither: DitherEffect;
+
+  // Final composite: a fullscreen quad sampling the processed texture.
+  private screenScene: THREE.Scene;
+  private screenCam: THREE.OrthographicCamera;
+  private screenMat: THREE.ShaderMaterial;
+
   private entities = new Map<string, Entity>();
   private windows: WinState[] = [];
+  settings: RenderSettings = { ...defaultSettings };
+
   private raf = 0;
   private last = 0;
   private time = 0;
@@ -35,15 +70,9 @@ export class World {
   private H = 0;
 
   constructor(private canvas: HTMLCanvasElement) {
-    this.renderer = new THREE.WebGLRenderer({
-      canvas,
-      antialias: false,
-      alpha: true,
-      premultipliedAlpha: true,
-    });
-    this.renderer.setPixelRatio(1); // crisp pixels, predictable scissor coords
+    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: false, alpha: true });
+    this.renderer.setPixelRatio(1);
     this.renderer.autoClear = false;
-    this.renderer.setClearColor(0x000000, 0);
 
     this.scene = new THREE.Scene();
     this.camera = new THREE.OrthographicCamera(0, 1, 1, 0, -1000, 1000);
@@ -52,13 +81,54 @@ export class World {
     this.H = canvas.clientHeight;
     this.sky = createSky(this.W, this.H);
     this.scene.add(this.sky);
+
+    // Post-processing chain, output kept in a buffer (not straight to screen).
+    this.composer = new EffectComposer(this.renderer);
+    this.composer.autoRenderToScreen = false;
+    this.bloom = new BloomEffect({
+      intensity: this.settings.bloom,
+      luminanceThreshold: 0.45,
+      luminanceSmoothing: 0.5,
+      mipmapBlur: true,
+      radius: 0.7,
+    });
+    this.pixelation = new PixelationEffect(this.settings.pixelSize);
+    this.dither = new DitherEffect({
+      dither: this.settings.dither,
+      levels: this.settings.levels,
+      warm: this.settings.warm,
+    });
+    this.composer.addPass(new RenderPass(this.scene, this.camera));
+    this.composer.addPass(
+      new EffectPass(this.camera, this.bloom, this.pixelation, this.dither)
+    );
+
+    // Composite quad: clip-space plane sampling the processed world.
+    this.screenScene = new THREE.Scene();
+    this.screenCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+    this.screenMat = new THREE.ShaderMaterial({
+      depthTest: false,
+      depthWrite: false,
+      uniforms: { uTex: { value: null } },
+      vertexShader: /* glsl */ `
+        varying vec2 vUv;
+        void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }
+      `,
+      fragmentShader: /* glsl */ `
+        precision highp float;
+        varying vec2 vUv;
+        uniform sampler2D uTex;
+        void main() { gl_FragColor = texture2D(uTex, vUv); }
+      `,
+    });
+    this.screenScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.screenMat));
+
     this.applySize();
   }
 
   setWindows(list: WinState[]) {
     this.windows = list;
     const seen = new Set(list.map((w) => w.id));
-    // Drop entities whose windows are gone.
     for (const [id, ent] of this.entities) {
       if (!seen.has(id)) {
         this.scene.remove(ent.object);
@@ -66,7 +136,6 @@ export class World {
         this.entities.delete(id);
       }
     }
-    // Spawn entities for new windows.
     for (const w of list) {
       if (!this.entities.has(w.id)) {
         const ent = makeEntity(w.kind);
@@ -90,6 +159,9 @@ export class World {
     this.camera.bottom = 0;
     this.camera.updateProjectionMatrix();
     resizeSky(this.sky, this.W, this.H);
+    // Composer/canvas stay at full resolution; the pixel grid comes from
+    // PixelationEffect, so the canvas never gets shrunk underneath us.
+    this.composer.setSize(this.W, this.H);
   }
 
   start() {
@@ -112,51 +184,63 @@ export class World {
       const ent = this.entities.get(win.id);
       if (!ent) continue;
       const r = contentRect(win);
-      const cx = r.x + r.w / 2;
-      const cy = H - (r.y + r.h / 2); // CSS top-left -> world y-up
-      ent.setRect(cx, cy, r.w, r.h);
+      ent.setRect(r.x + r.w / 2, H - (r.y + r.h / 2), r.w, r.h);
     }
 
     // 2. Gather the field's emitters.
     const lights: FieldLight[] = [];
+    const waters: FieldWater[] = [];
     for (const win of this.windows) {
       if (win.minimized) continue;
-      const l = this.entities.get(win.id)?.emit();
+      const ent = this.entities.get(win.id);
+      const l = ent?.emitLight?.();
       if (l) lights.push(l);
+      const w = ent?.emitWater?.();
+      if (w) waters.push(w);
     }
+    const field: Field = { lights, waters };
 
     // 3. Let reactors sample the field.
-    const ctx = { dt, time: this.time, lights };
+    const ctx = { dt, time: this.time, field };
     for (const ent of this.entities.values()) ent.update(ctx);
 
-    // 4. Upload the field to the sky shader.
+    // 4. Sync live settings into the post chain + upload the light field.
+    this.bloom.intensity = this.settings.bloom;
+    this.pixelation.granularity = this.settings.pixelSize;
+    this.dither.dither = this.settings.dither;
+    this.dither.levels = this.settings.levels;
+    this.dither.warm = this.settings.warm;
+    this.dither.pixel = this.settings.pixelSize;
     this.uploadLights(lights);
 
-    // 5. Render: clear once, then paint each window's slice via scissor.
+    // 5. Render the world through the post chain (result -> outputBuffer).
     this.renderer.setScissorTest(false);
+    this.composer.render(dt);
+
+    // 6. Composite each window's slice of the processed world to the canvas.
+    this.renderer.setRenderTarget(null);
+    this.renderer.setScissorTest(false);
+    this.renderer.setClearColor(0x000000, 0);
     this.renderer.clear(true, true, true);
-    this.renderer.setScissorTest(true);
+    this.screenMat.uniforms.uTex.value = this.composer.outputBuffer.texture;
     this.renderer.setViewport(0, 0, this.W, this.H);
+    this.renderer.setScissorTest(true);
 
-    const ordered = [...this.windows]
-      .filter((w) => !w.minimized)
-      .sort((a, b) => a.z - b.z);
-
+    const ordered = [...this.windows].filter((w) => !w.minimized).sort((a, b) => a.z - b.z);
     for (const win of ordered) {
       const r = contentRect(win);
       const gx = Math.round(r.x);
-      const gy = Math.round(H - (r.y + r.h)); // GL bottom-left origin
+      const gy = Math.round(H - (r.y + r.h));
       const gw = Math.round(r.w);
       const gh = Math.round(r.h);
       if (gw <= 0 || gh <= 0) continue;
       this.renderer.setScissor(gx, gy, gw, gh);
-      this.renderer.render(this.scene, this.camera);
+      this.renderer.render(this.screenScene, this.screenCam);
     }
   }
 
   private uploadLights(lights: FieldLight[]) {
-    const mat = this.sky.material as THREE.ShaderMaterial;
-    const u = mat.uniforms;
+    const u = (this.sky.material as THREE.ShaderMaterial).uniforms;
     const n = Math.min(lights.length, MAX_LIGHTS);
     u.uLightCount.value = n;
     const pos = u.uLightPos.value as THREE.Vector2[];
@@ -165,7 +249,7 @@ export class World {
     const str = u.uLightStrength.value as Float32Array;
     for (let i = 0; i < n; i++) {
       const l = lights[i];
-      pos[i].set(l.x, l.y); // already world / gl_FragCoord coords (y-up)
+      pos[i].set(l.x, l.y);
       col[i].set(l.color[0], l.color[1], l.color[2]);
       rad[i] = l.radius;
       str[i] = l.strength;
@@ -179,6 +263,7 @@ export class World {
     this.entities.clear();
     (this.sky.material as THREE.Material).dispose();
     this.sky.geometry.dispose();
+    this.composer.dispose();
     this.renderer.dispose();
   }
 }

@@ -78,16 +78,12 @@ export class City implements Entity {
     this.object.position.set(cx, cy, -1);
   }
 
-  emit() {
-    return null;
-  }
-
   update(ctx: UpdateCtx) {
     // Sample warm light arriving at the city; that decides day vs night.
     let warmAmt = 0;
     let dirX = 0;
     let dirY = 0;
-    for (const l of ctx.lights) {
+    for (const l of ctx.field.lights) {
       if (l.warm <= 0) continue;
       const dx = l.x - this.cx;
       const dy = l.y - this.cy;

@@ -8,6 +8,8 @@ const ITEMS: { kind: EntityKind; label: string }[] = [
   { kind: "sun", label: "+ sun" },
   { kind: "moon", label: "+ moon" },
   { kind: "city", label: "+ city" },
+  { kind: "cloud", label: "+ cloud" },
+  { kind: "plant", label: "+ plant" },
 ];
 
 export function Dock({ onAdd }: Props) {

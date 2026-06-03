@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { World } from "./world/World";
 import { DesktopWindow } from "./components/DesktopWindow";
 import { Dock } from "./components/Dock";
+import { Controls } from "./components/Controls";
+import { defaultSettings, type RenderSettings } from "./world/settings";
 import type { EntityKind, WinState } from "./world/types";
 
 let uid = 0;
@@ -11,32 +13,24 @@ const DEFAULT_SIZE: Record<EntityKind, { w: number; h: number }> = {
   sun: { w: 300, h: 252 },
   moon: { w: 280, h: 246 },
   city: { w: 470, h: 320 },
+  cloud: { w: 320, h: 220 },
+  plant: { w: 280, h: 300 },
 };
+
+function win(kind: EntityKind, x: number, y: number, z: number): WinState {
+  return { id: nextId(), kind, x: Math.round(x), y: Math.round(y), ...DEFAULT_SIZE[kind], z, minimized: false };
+}
 
 function initialWindows(): WinState[] {
   const vw = window.innerWidth;
   const vh = window.innerHeight;
   return [
-    // City sits centre-bottom and starts in darkness — bring a light to it.
-    {
-      id: nextId(),
-      kind: "city",
-      x: Math.round((vw - DEFAULT_SIZE.city.w) / 2),
-      y: Math.round(vh - DEFAULT_SIZE.city.h - 90),
-      ...DEFAULT_SIZE.city,
-      z: 1,
-      minimized: false,
-    },
-    { id: nextId(), kind: "sun", x: 70, y: 80, ...DEFAULT_SIZE.sun, z: 2, minimized: false },
-    {
-      id: nextId(),
-      kind: "moon",
-      x: Math.round(vw - DEFAULT_SIZE.moon.w - 60),
-      y: 90,
-      ...DEFAULT_SIZE.moon,
-      z: 3,
-      minimized: false,
-    },
+    // A little ecosystem to tend: city + plant below, sky-makers above.
+    win("city", (vw - DEFAULT_SIZE.city.w) / 2 + 120, vh - DEFAULT_SIZE.city.h - 70, 1),
+    win("plant", 80, vh - DEFAULT_SIZE.plant.h - 70, 2),
+    win("sun", 60, 70, 3),
+    win("cloud", (vw - DEFAULT_SIZE.cloud.w) / 2, 60, 4),
+    win("moon", vw - DEFAULT_SIZE.moon.w - 60, 90, 5),
   ];
 }
 
@@ -44,7 +38,8 @@ export default function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const worldRef = useRef<World | null>(null);
   const [windows, setWindows] = useState<WinState[]>(initialWindows);
-  const topZ = useRef(3);
+  const [settings, setSettings] = useState<RenderSettings>(defaultSettings);
+  const topZ = useRef(5);
 
   // Boot the shared world once.
   useEffect(() => {
@@ -65,6 +60,11 @@ export default function App() {
   useEffect(() => {
     worldRef.current?.setWindows(windows);
   }, [windows]);
+
+  // Live render settings: mutate the world's settings object in place.
+  useEffect(() => {
+    if (worldRef.current) Object.assign(worldRef.current.settings, settings);
+  }, [settings]);
 
   const focus = (id: string) =>
     setWindows((ws) => {
@@ -102,8 +102,9 @@ export default function App() {
     <>
       <canvas id="world-canvas" ref={canvasRef} />
       <div className="hint">
-        drag the sun toward the city &nbsp;·&nbsp; or the moon, for nightfall
+        drag the sun to the plant &nbsp;·&nbsp; a cloud above it rains &nbsp;·&nbsp; the moon brings night
       </div>
+      <Controls settings={settings} onChange={setSettings} />
       <div className="desktop">
         {windows.map((w) => (
           <DesktopWindow
