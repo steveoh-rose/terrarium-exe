@@ -15,6 +15,7 @@ import { Moon } from "./entities/moon";
 import { City } from "./entities/city";
 import { Cloud } from "./entities/cloud";
 import { Plant } from "./entities/plant";
+import { Drawn } from "./entities/drawn";
 import {
   contentRect,
   type WinState,
@@ -22,9 +23,19 @@ import {
   type FieldLight,
   type FieldWater,
 } from "./types";
+import type { CreatureSpec } from "../interpret/schema";
 
-function makeEntity(kind: WinState["kind"]): Entity {
-  switch (kind) {
+/** A roaming creature's identity + where it was born (CSS px, top-left). */
+export interface CreatureSeed {
+  id: string;
+  spec: CreatureSpec;
+  x: number;
+  y: number;
+}
+
+/** Build the world entity for a window, or null for windows that have none (paint). */
+function makeEntity(win: WinState): Entity | null {
+  switch (win.kind) {
     case "sun":
       return new Sun();
     case "moon":
@@ -35,6 +46,8 @@ function makeEntity(kind: WinState["kind"]): Entity {
       return new Cloud();
     case "plant":
       return new Plant();
+    case "paint":
+      return null; // a DOM drawing surface, not a world entity
   }
 }
 
@@ -47,6 +60,7 @@ function makeEntity(kind: WinState["kind"]): Entity {
 export class World {
   private renderer: THREE.WebGLRenderer;
   private scene: THREE.Scene;
+  private creatureScene: THREE.Scene; // creatures roam on top of everything
   private camera: THREE.OrthographicCamera;
   private sky: THREE.Mesh;
   private composer: EffectComposer;
@@ -60,8 +74,11 @@ export class World {
   private screenMat: THREE.ShaderMaterial;
 
   private entities = new Map<string, Entity>();
+  private creatures = new Map<string, Drawn>();
   private windows: WinState[] = [];
   settings: RenderSettings = { ...defaultSettings };
+  /** Cursor position in world coords (y-up), set by React; creatures follow it. */
+  pointer: { x: number; y: number; active: boolean } | null = null;
 
   private raf = 0;
   private last = 0;
@@ -75,6 +92,7 @@ export class World {
     this.renderer.autoClear = false;
 
     this.scene = new THREE.Scene();
+    this.creatureScene = new THREE.Scene();
     this.camera = new THREE.OrthographicCamera(0, 1, 1, 0, -1000, 1000);
 
     this.W = canvas.clientWidth;
@@ -138,12 +156,64 @@ export class World {
     }
     for (const w of list) {
       if (!this.entities.has(w.id)) {
-        const ent = makeEntity(w.kind);
-        this.entities.set(w.id, ent);
-        this.scene.add(ent.object);
+        const ent = makeEntity(w);
+        if (ent) {
+          this.entities.set(w.id, ent);
+          this.scene.add(ent.object);
+        }
       }
     }
   }
+
+  /** Sync the set of roaming creatures (born from paint windows). */
+  setCreatures(list: CreatureSeed[]) {
+    const seen = new Set(list.map((c) => c.id));
+    for (const [id, cr] of this.creatures) {
+      if (!seen.has(id)) {
+        this.creatureScene.remove(cr.object);
+        cr.dispose();
+        this.creatures.delete(id);
+      }
+    }
+    for (const c of list) {
+      if (!this.creatures.has(c.id)) {
+        // Spawn at the paint window's location (CSS top-left -> world y-up).
+        const cr = new Drawn(c.spec, c.x, this.H - c.y);
+        this.creatures.set(c.id, cr);
+        this.creatureScene.add(cr.object);
+      }
+    }
+  }
+
+  /** World-space content rects of the portal windows creatures can appear in. */
+  private portalRects() {
+    const H = this.H;
+    const rects: { x: number; y: number; w: number; h: number }[] = [];
+    for (const win of this.windows) {
+      if (win.minimized || !this.entities.has(win.id)) continue;
+      const r = contentRect(win);
+      rects.push({ x: r.x, y: H - (r.y + r.h), w: r.w, h: r.h });
+    }
+    return rects;
+  }
+
+  /** Nibble a plant whose portal contains the world point; returns true if eaten. */
+  private biteAt = (x: number, y: number, amount: number): boolean => {
+    const H = this.H;
+    for (const win of this.windows) {
+      if (win.kind !== "plant" || win.minimized) continue;
+      const r = contentRect(win);
+      const wx = r.x, wy = H - (r.y + r.h);
+      if (x >= wx && x <= wx + r.w && y >= wy && y <= wy + r.h) {
+        const ent = this.entities.get(win.id);
+        if (ent instanceof Plant) {
+          ent.bite(amount);
+          return true;
+        }
+      }
+    }
+    return false;
+  };
 
   resize() {
     this.W = this.canvas.clientWidth;
@@ -187,7 +257,7 @@ export class World {
       ent.setRect(r.x + r.w / 2, H - (r.y + r.h / 2), r.w, r.h);
     }
 
-    // 2. Gather the field's emitters.
+    // 2. Gather the field's emitters — from windows AND roaming creatures.
     const lights: FieldLight[] = [];
     const waters: FieldWater[] = [];
     for (const win of this.windows) {
@@ -198,11 +268,33 @@ export class World {
       const w = ent?.emitWater?.();
       if (w) waters.push(w);
     }
+    for (const cr of this.creatures.values()) {
+      const l = cr.emitLight();
+      if (l) lights.push(l);
+      const w = cr.emitWater();
+      if (w) waters.push(w);
+    }
     const field: Field = { lights, waters };
 
-    // 3. Let reactors sample the field.
+    // 3. Let window reactors sample the field.
     const ctx = { dt, time: this.time, field };
     for (const ent of this.entities.values()) ent.update(ctx);
+
+    // 3b. Let creatures roam: sense the field, the portals, and the cursor.
+    if (this.creatures.size) {
+      const env = {
+        dt,
+        time: this.time,
+        field,
+        W: this.W,
+        H: this.H,
+        pixelSize: this.settings.pixelSize,
+        pointer: this.pointer,
+        windows: this.portalRects(),
+        biteAt: this.biteAt,
+      };
+      for (const cr of this.creatures.values()) cr.update(env);
+    }
 
     // 4. Sync live settings into the post chain + upload the light field.
     this.bloom.intensity = this.settings.bloom;
@@ -226,7 +318,11 @@ export class World {
     this.renderer.setViewport(0, 0, this.W, this.H);
     this.renderer.setScissorTest(true);
 
-    const ordered = [...this.windows].filter((w) => !w.minimized).sort((a, b) => a.z - b.z);
+    // Only windows backed by a world entity get a portal slice; paint windows
+    // render their own opaque DOM canvas instead.
+    const ordered = [...this.windows]
+      .filter((w) => !w.minimized && this.entities.has(w.id))
+      .sort((a, b) => a.z - b.z);
     for (const win of ordered) {
       const r = contentRect(win);
       const gx = Math.round(r.x);
@@ -236,6 +332,14 @@ export class World {
       if (gw <= 0 || gh <= 0) continue;
       this.renderer.setScissor(gx, gy, gw, gh);
       this.renderer.render(this.screenScene, this.screenCam);
+    }
+
+    // 7. Creatures roam ON TOP of the desktop — always visible, passing in
+    //    front of the windows they cross.
+    if (this.creatures.size) {
+      this.renderer.setScissorTest(false);
+      this.renderer.setViewport(0, 0, this.W, this.H);
+      this.renderer.render(this.creatureScene, this.camera);
     }
   }
 
@@ -261,6 +365,8 @@ export class World {
     cancelAnimationFrame(this.raf);
     for (const ent of this.entities.values()) ent.dispose();
     this.entities.clear();
+    for (const cr of this.creatures.values()) cr.dispose();
+    this.creatures.clear();
     (this.sky.material as THREE.Material).dispose();
     this.sky.geometry.dispose();
     this.composer.dispose();

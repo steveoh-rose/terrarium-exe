@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import { World } from "./world/World";
+import { World, type CreatureSeed } from "./world/World";
 import { DesktopWindow } from "./components/DesktopWindow";
 import { Dock } from "./components/Dock";
 import { Controls } from "./components/Controls";
+import { PaintWindow } from "./components/PaintWindow";
 import { defaultSettings, type RenderSettings } from "./world/settings";
+import type { CreatureSpec } from "./interpret/schema";
 import type { EntityKind, WinState } from "./world/types";
 
 let uid = 0;
@@ -15,6 +17,7 @@ const DEFAULT_SIZE: Record<EntityKind, { w: number; h: number }> = {
   city: { w: 470, h: 320 },
   cloud: { w: 320, h: 220 },
   plant: { w: 280, h: 300 },
+  paint: { w: 300, h: 392 },
 };
 
 function win(kind: EntityKind, x: number, y: number, z: number): WinState {
@@ -38,6 +41,7 @@ export default function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const worldRef = useRef<World | null>(null);
   const [windows, setWindows] = useState<WinState[]>(initialWindows);
+  const [creatures, setCreatures] = useState<CreatureSeed[]>([]);
   const [settings, setSettings] = useState<RenderSettings>(defaultSettings);
   const topZ = useRef(5);
 
@@ -48,18 +52,32 @@ export default function App() {
     worldRef.current = world;
     world.start();
     const onResize = () => world.resize();
+    // Creatures follow the cursor, so you can lead them between windows.
+    const onMove = (e: PointerEvent) => {
+      world.pointer = { x: e.clientX, y: window.innerHeight - e.clientY, active: true };
+    };
+    const onLeave = () => {
+      if (world.pointer) world.pointer.active = false;
+    };
     window.addEventListener("resize", onResize);
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerleave", onLeave);
     return () => {
       window.removeEventListener("resize", onResize);
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerleave", onLeave);
       world.dispose();
       worldRef.current = null;
     };
   }, []);
 
-  // Push window state to the world every render.
   useEffect(() => {
     worldRef.current?.setWindows(windows);
   }, [windows]);
+
+  useEffect(() => {
+    worldRef.current?.setCreatures(creatures);
+  }, [creatures]);
 
   // Live render settings: mutate the world's settings object in place.
   useEffect(() => {
@@ -79,6 +97,23 @@ export default function App() {
 
   const minimize = (id: string) =>
     setWindows((ws) => ws.map((w) => (w.id === id ? { ...w, minimized: !w.minimized } : w)));
+
+  // A paint window's drawing came to life: release a roaming creature where it
+  // was drawn, and close the paint window.
+  const birth = (paintId: string, spec: CreatureSpec) => {
+    const paint = windows.find((w) => w.id === paintId);
+    if (!paint) return;
+    const seed: CreatureSeed = {
+      id: nextId(),
+      spec,
+      x: paint.x + paint.w / 2,
+      y: paint.y + paint.h / 2,
+    };
+    setCreatures((cs) => [...cs, seed]);
+    setWindows((ws) => ws.filter((w) => w.id !== paintId));
+  };
+
+  const releaseAll = () => setCreatures([]);
 
   const add = (kind: EntityKind) =>
     setWindows((ws) => {
@@ -102,7 +137,7 @@ export default function App() {
     <>
       <canvas id="world-canvas" ref={canvasRef} />
       <div className="hint">
-        drag the sun to the plant &nbsp;·&nbsp; a cloud above it rains &nbsp;·&nbsp; the moon brings night
+        draw a creature &nbsp;·&nbsp; it roams the windows &nbsp;·&nbsp; a fish needs water, a bird sleeps in moonlight
       </div>
       <Controls settings={settings} onChange={setSettings} />
       <div className="desktop">
@@ -114,10 +149,15 @@ export default function App() {
             onFocus={focus}
             onClose={close}
             onMinimize={minimize}
+            body={
+              w.kind === "paint" ? (
+                <PaintWindow onBirth={(spec) => birth(w.id, spec)} />
+              ) : undefined
+            }
           />
         ))}
       </div>
-      <Dock onAdd={add} />
+      <Dock onAdd={add} onRelease={creatures.length ? releaseAll : undefined} />
     </>
   );
 }

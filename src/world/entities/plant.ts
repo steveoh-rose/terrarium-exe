@@ -132,6 +132,11 @@ export class Plant implements Entity {
     this.object.position.set(cx, cy, 0);
   }
 
+  /** A creature nibbles the plant, setting its growth back. */
+  bite(amount: number) {
+    this.growth = Math.max(0, this.growth - amount);
+  }
+
   update(ctx: UpdateCtx) {
     const light = sampleWarm(ctx.field, this.cx, this.cy);
     const water = sampleWater(ctx.field, this.cx, this.cy);
