@@ -28,7 +28,9 @@ export function createSky(width: number, height: number) {
       uLightStrength: { value: new Float32Array(MAX_LIGHTS) },
     },
     vertexShader: /* glsl */ `
+      varying vec2 vUv;
       void main() {
+        vUv = uv;
         gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
       }
     `,
@@ -42,21 +44,17 @@ export function createSky(width: number, height: number) {
       uniform float uLightRadius[${MAX_LIGHTS}];
       uniform float uLightStrength[${MAX_LIGHTS}];
 
+      varying vec2 vUv;
+
       float hash(vec2 p) {
         return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
       }
 
-      // Cheap ordered 2x2 Bayer dither, centred on zero.
-      float bayer2(vec2 p) {
-        float x = mod(floor(p.x), 2.0);
-        float y = mod(floor(p.y), 2.0);
-        float v = x < 0.5 ? (y < 0.5 ? 0.0 : 3.0) : (y < 0.5 ? 2.0 : 1.0);
-        return v / 4.0 - 0.375;
-      }
-
       void main() {
-        vec2 frag = gl_FragCoord.xy; // bottom-left origin
-        vec3 night = vec3(0.07, 0.06, 0.16);
+        // World-pixel position, independent of the low-res render buffer.
+        vec2 frag = vUv * uResolution;
+        // Cozy warm-autumn dusk as the unlit base (not a cold black).
+        vec3 night = vec3(0.13, 0.09, 0.13);
         vec3 col = night;
         float lightAmt = 0.0;
 
@@ -68,15 +66,19 @@ export function createSky(width: number, height: number) {
           lightAmt += a;
         }
 
-        // Stars live only where the field is dark.
-        float dark = clamp(1.0 - lightAmt, 0.0, 1.0);
+        // A peachy bloom in well-lit regions warms the whole sky toward day.
+        float day = clamp(lightAmt, 0.0, 1.0);
+        vec3 dayTint = vec3(1.0, 0.74, 0.55);
+        col = mix(col, col * 0.5 + dayTint * 0.6, day * 0.7);
+
+        // Stars (warm cream) live only where the field stays dark.
+        float dark = clamp(1.0 - lightAmt * 1.4, 0.0, 1.0);
         vec2 cell = floor(frag / 2.0);
         float h = hash(cell);
-        float star = step(0.987, h) * dark;
+        float star = step(0.988, h) * dark;
         star *= 0.55 + 0.45 * sin(uTime * 3.0 + h * 100.0);
-        col += vec3(star) * 0.9;
+        col += vec3(1.0, 0.92, 0.78) * star * 0.9;
 
-        col += bayer2(frag) * 0.025;
         gl_FragColor = vec4(col, 1.0);
       }
     `,

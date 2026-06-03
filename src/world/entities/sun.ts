@@ -55,7 +55,7 @@ export class Sun implements Entity {
     this.object.position.set(cx, cy, 0);
   }
 
-  emit(): FieldLight {
+  emitLight(): FieldLight {
     return {
       x: this.cx,
       y: this.cy,
