@@ -1,4 +1,4 @@
-import { useRef } from "react";
+import { useRef, type ReactNode } from "react";
 import type { WinState } from "../world/types";
 
 interface Props {
@@ -7,6 +7,8 @@ interface Props {
   onFocus: (id: string) => void;
   onClose: (id: string) => void;
   onMinimize: (id: string) => void;
+  /** Opaque DOM content (e.g. the paint surface) instead of a world porthole. */
+  body?: ReactNode;
 }
 
 const TITLES: Record<WinState["kind"], string> = {
@@ -15,9 +17,10 @@ const TITLES: Record<WinState["kind"], string> = {
   city: "city.gif",
   cloud: "cloud.exe",
   plant: "terra.exe",
+  paint: "paint.exe",
 };
 
-export function DesktopWindow({ win, onMove, onFocus, onClose, onMinimize }: Props) {
+export function DesktopWindow({ win, onMove, onFocus, onClose, onMinimize, body }: Props) {
   const drag = useRef<{ dx: number; dy: number } | null>(null);
 
   function onPointerDown(e: React.PointerEvent) {
@@ -48,7 +51,7 @@ export function DesktopWindow({ win, onMove, onFocus, onClose, onMinimize }: Pro
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
       >
-        <span className="win__title">{TITLES[win.kind]}</span>
+        <span className="win__title">{win.title ?? TITLES[win.kind]}</span>
         <div className="win__buttons">
           <button
             className="win__btn"
@@ -69,8 +72,8 @@ export function DesktopWindow({ win, onMove, onFocus, onClose, onMinimize }: Pro
         </div>
       </div>
       {!win.minimized && (
-        <div className="win__content">
-          <div className="win__scanlines" />
+        <div className={`win__content${body ? " win__content--solid" : ""}`}>
+          {body ?? <div className="win__scanlines" />}
         </div>
       )}
     </div>

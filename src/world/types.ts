@@ -1,4 +1,4 @@
-export type EntityKind = "sun" | "moon" | "city" | "cloud" | "plant";
+export type EntityKind = "sun" | "moon" | "city" | "cloud" | "plant" | "paint";
 
 /** A window's authoritative state, owned by React, read by the World each frame. */
 export interface WinState {
@@ -10,6 +10,7 @@ export interface WinState {
   h: number;
   z: number;
   minimized: boolean;
+  title?: string; // overrides the default title (e.g. paint.exe)
 }
 
 export const TITLE_H = 26; // must match .win__titlebar height in styles.css
